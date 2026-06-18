@@ -916,20 +916,17 @@ func (n *linuxNodeHandler) hybridMode() bool {
 	return n.nodeConfig.EnableEncapsulation && n.nodeConfig.RequiresNativeRouting
 }
 
-// nodeRequiresTunnelRoute returns true if the remote node is not in the same
-// subnet group as the local node, based on the user-configured subnet topology.
-// Nodes in the same subnet group use native routing; nodes in different groups
-// ,or not found in any group) require tunnel encapsulation.
+// nodeRequiresTunnelRoute returns true if the remote node's pod CIDRs do not
+// share any subnet group with the local node's pod CIDRs, based on the
+// user-configured subnet topology. Per the hybrid-routing CFP, native routing
+// is decided by looking up the source and destination pod IPs (not node IPs)
+// against the subnet topology, so group membership is a property of pod CIDRs.
+//
+// If any local pod CIDR and any remote pod CIDR resolve to the same non-zero
+// group, native routing is possible between those pods and no tunnel route is
+// required to the remote node. Otherwise, tunnel encapsulation is required.
 func (n *linuxNodeHandler) nodeRequiresTunnelRoute(remoteNode *nodeTypes.Node) bool {
 	if remoteNode == nil {
-		return true
-	}
-
-	remoteIP := remoteNode.GetNodeIP(false) // IPv4
-	if remoteIP == nil {
-		remoteIP = remoteNode.GetNodeIP(true) // IPv6
-	}
-	if remoteIP == nil {
 		return true
 	}
 
@@ -937,25 +934,48 @@ func (n *linuxNodeHandler) nodeRequiresTunnelRoute(remoteNode *nodeTypes.Node) b
 	if err != nil {
 		return true
 	}
-	localIP := ln.GetNodeIP(false)
-	if localIP == nil {
-		localIP = ln.GetNodeIP(true) // IPv6
+
+	// Collect the set of subnet groups that the local node's pod CIDRs belong to.
+	localGroups := make(map[uint32]struct{})
+	collectGroups := func(cidrs []*cidr.CIDR) {
+		for _, c := range cidrs {
+			addr, ok := netip.AddrFromSlice(c.IP)
+			if !ok {
+				continue
+			}
+			if gid := n.lookupSubnetID(addr); gid != 0 {
+				localGroups[gid] = struct{}{}
+			}
+		}
 	}
-	if localIP == nil {
+	collectGroups(ln.GetIPv4AllocCIDRs())
+	collectGroups(ln.GetIPv6AllocCIDRs())
+
+	if len(localGroups) == 0 {
 		return true
 	}
 
-	localAddr, ok1 := netip.AddrFromSlice(localIP)
-	remoteAddr, ok2 := netip.AddrFromSlice(remoteIP)
-	if !ok1 || !ok2 {
-		return true
+	// If any remote pod CIDR falls into a group shared with the local node,
+	// native routing can be used and no tunnel route is required.
+	matchesLocalGroup := func(cidrs []*cidr.CIDR) bool {
+		for _, c := range cidrs {
+			addr, ok := netip.AddrFromSlice(c.IP)
+			if !ok {
+				continue
+			}
+			if gid := n.lookupSubnetID(addr); gid != 0 {
+				if _, ok := localGroups[gid]; ok {
+					return true
+				}
+			}
+		}
+		return false
 	}
-
-	localGroupID := n.lookupSubnetID(localAddr)
-	remoteGroupID := n.lookupSubnetID(remoteAddr)
-
-	// Same non-zero group = native routing, otherwise tunnel is required.
-	return localGroupID != remoteGroupID || localGroupID == 0
+	if matchesLocalGroup(remoteNode.GetIPv4AllocCIDRs()) ||
+		matchesLocalGroup(remoteNode.GetIPv6AllocCIDRs()) {
+		return false
+	}
+	return true
 }
 
 // lookupSubnetID returns the subnet group identity for the given IP address
@@ -973,52 +993,39 @@ func (n *linuxNodeHandler) lookupSubnetID(addr netip.Addr) uint32 {
 }
 
 // insertPodCIDRSubnetEntries inserts the node's pod CIDRs into the subnet table
-// with the same group identity as the node IP, so the eBPF datapath can map
-// pod IPs to the correct subnet group.
+// using the group identity associated with each pod CIDR's prefix, so the eBPF
+// datapath can map pod IPs to the correct subnet group.
+//
+// Each pod CIDR is looked up independently against the admin-configured subnet
+// topology: if a pod CIDR falls within a configured group, it is inserted under
+// that group; otherwise it is skipped.
 func (n *linuxNodeHandler) insertPodCIDRSubnetEntries(node *nodeTypes.Node) {
 	if n.db == nil || n.subnetTable == nil {
-		return
-	}
-
-	nodeIP := node.GetNodeIP(false)
-	if nodeIP == nil {
-		nodeIP = node.GetNodeIP(true)
-	}
-	if nodeIP == nil {
-		return
-	}
-
-	addr, ok := netip.AddrFromSlice(nodeIP)
-	if !ok {
-		return
-	}
-
-	groupID := n.lookupSubnetID(addr)
-	if groupID == 0 {
 		return
 	}
 
 	wtx := n.db.WriteTxn(n.subnetTable)
 	defer wtx.Commit()
 
-	for _, c := range node.GetIPv4AllocCIDRs() {
-		prefix, ok := netip.AddrFromSlice(c.IP)
+	insertCIDR := func(c *cidr.CIDR) {
+		addr, ok := netip.AddrFromSlice(c.IP)
 		if !ok {
-			continue
+			return
+		}
+		groupID := n.lookupSubnetID(addr)
+		if groupID == 0 {
+			return
 		}
 		ones, _ := c.Mask.Size()
-		p := netip.PrefixFrom(prefix, ones)
+		p := netip.PrefixFrom(addr, ones)
 		n.subnetTable.Insert(wtx, subnetmap.NewSubnetEntry(p, groupID))
 	}
 
+	for _, c := range node.GetIPv4AllocCIDRs() {
+		insertCIDR(c)
+	}
 	for _, c := range node.GetIPv6AllocCIDRs() {
-		prefix, ok := netip.AddrFromSlice(c.IP)
-		if !ok {
-			continue
-		}
-		ones, _ := c.Mask.Size()
-		p := netip.PrefixFrom(prefix, ones)
-		n.subnetTable.Insert(wtx, subnetmap.NewSubnetEntry(p, groupID))
+		insertCIDR(c)
 	}
 }
 

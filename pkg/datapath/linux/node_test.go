@@ -278,102 +278,91 @@ func TestLookupSubnetID(t *testing.T) {
 
 func TestNodeRequiresTunnelRoute(t *testing.T) {
 	tests := []struct {
-		name       string
-		localIP    string
-		remoteNode *nodeTypes.Node
-		entries    []subnetmap.SubnetTableEntry
-		expected   bool
+		name         string
+		localPodCIDR string
+		remoteNode   *nodeTypes.Node
+		entries      []subnetmap.SubnetTableEntry
+		expected     bool
 	}{
 		{
-			name:    "same subnet group - no tunnel needed",
-			localIP: "10.0.0.5",
-			remoteNode: makeNode("10.0.0.10"),
+			name:         "same subnet group - no tunnel needed",
+			localPodCIDR: "10.244.0.0/24",
+			remoteNode:   makeNodeWithPodCIDRs("10.0.0.10", "10.244.1.0/24"),
 			entries: []subnetmap.SubnetTableEntry{
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.0.0.0/24"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.244.0.0/16"), 1),
 			},
 			expected: false,
 		},
 		{
-			name:    "different subnet groups - tunnel needed",
-			localIP: "10.0.0.5",
-			remoteNode: makeNode("10.1.0.10"),
+			name:         "different subnet groups - tunnel needed",
+			localPodCIDR: "10.244.0.0/24",
+			remoteNode:   makeNodeWithPodCIDRs("10.1.0.10", "10.245.0.0/24"),
 			entries: []subnetmap.SubnetTableEntry{
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.0.0.0/24"), 1),
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.1.0.0/24"), 2),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.244.0.0/16"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.245.0.0/16"), 2),
 			},
 			expected: true,
 		},
 		{
-			name:    "broad CIDR covers both node IPs - same group",
-			localIP: "10.0.0.5",
-			remoteNode: makeNode("10.0.1.10"),
+			name:         "broad CIDR covers both pod CIDRs - same group",
+			localPodCIDR: "10.244.0.0/24",
+			remoteNode:   makeNodeWithPodCIDRs("10.0.1.10", "10.244.1.0/24"),
 			entries: []subnetmap.SubnetTableEntry{
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.0.0.0/16"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.244.0.0/16"), 1),
 			},
 			expected: false,
 		},
 		{
-			name:    "node IPs in same group - returns false even without pod CIDRs in table",
-			localIP: "10.0.0.5",
-			remoteNode: makeNode("10.0.0.10"),
-			entries: []subnetmap.SubnetTableEntry{
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.0.0.0/24"), 1),
-			},
-			expected: false,
+			name:         "nil remote node - tunnel needed",
+			localPodCIDR: "10.244.0.0/24",
+			remoteNode:   nil,
+			entries:      []subnetmap.SubnetTableEntry{},
+			expected:     true,
 		},
 		{
-			name:       "nil remote node - tunnel needed",
-			localIP:    "10.0.0.5",
-			remoteNode: nil,
-			entries:    []subnetmap.SubnetTableEntry{},
-			expected:   true,
-		},
-		{
-			name:    "remote node with no IPs - tunnel needed",
-			localIP: "10.0.0.5",
-			remoteNode: &nodeTypes.Node{
-				IPAddresses: []nodeTypes.Address{},
-			},
+			name:         "remote node with no pod CIDRs - tunnel needed",
+			localPodCIDR: "10.244.0.0/24",
+			remoteNode:   makeNode("10.0.0.10"),
 			entries: []subnetmap.SubnetTableEntry{
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.0.0.0/24"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.244.0.0/16"), 1),
 			},
 			expected: true,
 		},
 		{
-			name:    "empty subnet table - tunnel needed (both return 0)",
-			localIP: "10.0.0.5",
-			remoteNode: makeNode("10.0.0.10"),
-			entries:  []subnetmap.SubnetTableEntry{},
-			expected: true,
+			name:         "empty subnet table - tunnel needed (no local groups)",
+			localPodCIDR: "10.244.0.0/24",
+			remoteNode:   makeNodeWithPodCIDRs("10.0.0.10", "10.244.1.0/24"),
+			entries:      []subnetmap.SubnetTableEntry{},
+			expected:     true,
 		},
 		{
-			name:    "local in group but remote not - tunnel needed",
-			localIP: "10.0.0.5",
-			remoteNode: makeNode("192.168.1.10"),
+			name:         "local pod CIDR in group but remote not - tunnel needed",
+			localPodCIDR: "10.244.0.0/24",
+			remoteNode:   makeNodeWithPodCIDRs("192.168.1.10", "10.99.0.0/24"),
 			entries: []subnetmap.SubnetTableEntry{
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.0.0.0/24"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.244.0.0/16"), 1),
 			},
 			expected: true,
 		},
 		{
-			name:    "multiple groups - nodes in separate groups",
-			localIP: "10.0.0.5",
-			remoteNode: makeNode("10.20.0.10"),
+			name:         "multiple groups - pod CIDRs in separate groups",
+			localPodCIDR: "10.244.0.0/24",
+			remoteNode:   makeNodeWithPodCIDRs("10.20.0.10", "10.246.0.0/24"),
 			entries: []subnetmap.SubnetTableEntry{
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.0.0.0/24"), 1),
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.10.0.0/24"), 1),
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.20.0.0/24"), 2),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.244.0.0/16"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.245.0.0/16"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.246.0.0/16"), 2),
 			},
 			expected: true,
 		},
 		{
-			name:    "multiple groups - nodes in same group via different CIDRs",
-			localIP: "10.0.0.5",
-			remoteNode: makeNode("10.10.0.10"),
+			name:         "multiple groups - pod CIDRs in same group via different parent CIDRs",
+			localPodCIDR: "10.244.0.0/24",
+			remoteNode:   makeNodeWithPodCIDRs("10.10.0.10", "10.245.0.0/24"),
 			entries: []subnetmap.SubnetTableEntry{
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.0.0.0/24"), 1),
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.10.0.0/24"), 1),
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.20.0.0/24"), 2),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.244.0.0/16"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.245.0.0/16"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.246.0.0/16"), 2),
 			},
 			expected: false,
 		},
@@ -387,9 +376,12 @@ func TestNodeRequiresTunnelRoute(t *testing.T) {
 			localNode := node.LocalNode{
 				Node: nodeTypes.Node{
 					IPAddresses: []nodeTypes.Address{
-						{Type: addressing.NodeInternalIP, IP: net.ParseIP(tt.localIP)},
+						{Type: addressing.NodeInternalIP, IP: net.ParseIP("10.0.0.5")},
 					},
 				},
+			}
+			if tt.localPodCIDR != "" {
+				localNode.Node.IPv4AllocCIDR = cidr.MustParseCIDR(tt.localPodCIDR)
 			}
 			lns := node.NewTestLocalNodeStore(localNode)
 
@@ -412,24 +404,24 @@ func TestInsertPodCIDRSubnetEntries(t *testing.T) {
 		{
 			name: "inserts pod CIDR with correct group ID",
 			entries: []subnetmap.SubnetTableEntry{
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.0.0.0/24"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.244.0.0/16"), 1),
 			},
 			node:            makeNodeWithPodCIDRs("10.0.0.5", "10.244.1.0/24"),
 			expectedEntries: []netip.Prefix{netip.MustParsePrefix("10.244.1.0/24")},
 			expectedGroupID: 1,
 		},
 		{
-			name: "node IP not in any group - no pod CIDRs inserted",
+			name: "pod CIDR not in any group - not inserted",
 			entries: []subnetmap.SubnetTableEntry{
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.0.0.0/24"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.244.0.0/16"), 1),
 			},
-			node:            makeNodeWithPodCIDRs("192.168.1.5", "10.244.1.0/24"),
+			node:            makeNodeWithPodCIDRs("10.0.0.5", "10.99.0.0/24"),
 			expectedEntries: nil,
 		},
 		{
 			name: "node with no pod CIDRs - nothing inserted",
 			entries: []subnetmap.SubnetTableEntry{
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.0.0.0/24"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.244.0.0/16"), 1),
 			},
 			node:            makeNode("10.0.0.5"),
 			expectedEntries: nil,
@@ -441,14 +433,15 @@ func TestInsertPodCIDRSubnetEntries(t *testing.T) {
 			expectedEntries: nil,
 		},
 		{
-			name: "node with no IP - no pod CIDRs inserted",
+			name: "node with no IP but pod CIDR in group - pod CIDR still inserted",
 			entries: []subnetmap.SubnetTableEntry{
-				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.0.0.0/24"), 1),
+				subnetmap.NewSubnetEntry(netip.MustParsePrefix("10.244.0.0/16"), 1),
 			},
 			node: &nodeTypes.Node{
 				IPv4AllocCIDR: cidr.MustParseCIDR("10.244.1.0/24"),
 			},
-			expectedEntries: nil,
+			expectedEntries: []netip.Prefix{netip.MustParsePrefix("10.244.1.0/24")},
+			expectedGroupID: 1,
 		},
 	}
 

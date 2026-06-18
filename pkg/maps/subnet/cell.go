@@ -34,6 +34,7 @@ var Cell = cell.Module(
 	cell.Provide(
 		newSubnetMap,        // eBPF map
 		newSubnetEntryTable, // StateDB table
+		statedb.RWTable[SubnetTableEntry].ToTable, // Read-only view of the table
 
 		scriptCommands, // Script commands
 	),
